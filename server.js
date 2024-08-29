@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 import express from "express";
-import nodemailer from "nodemailer";
+
 import bodyParser from "body-parser";
 import { z } from "zod";
 import morgan, { compile } from "morgan";
@@ -13,6 +13,7 @@ import jwt from "jsonwebtoken";
 import multer from "multer";
 import path from "path";
 import { fileURLToPath } from "url";
+import transporter from "./email/emailConfig.js";
 
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
@@ -28,13 +29,20 @@ app.use(
 app.use(express.static(path.join(__dirname, "public")));
 dotenv.config();
 
-app.use(
-  cors({
-    origin: "http://localhost:5173",
-    // methods: ["POST", "GET"],
-    // allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+// app.use(
+//   cors({
+//     origin: "http://localhost:5173",
+//     // methods: "GET,POST",
+//     // allowedHeaders: "Content-Type",
+//   })
+// );
+
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "http://localhost:5173");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  next();
+});
 
 const formSchema = z.object({
   fullName: z.string().min(1, "Full Name is required"),
@@ -43,15 +51,6 @@ const formSchema = z.object({
     .min(1, "Email Address or Phone Number is required")
     .email("Invalid email format"),
   message: z.string().min(1, "Message is required"),
-});
-
-const transporter = nodemailer.createTransport({
-  host: "srv571856.hstgr.cloud",
-  port: 465,
-  auth: {
-    user: "hello@abcd.graphics",
-    pass: `0k$I]NRN}LJU`,
-  },
 });
 
 app.post("/api/send-mail", async (req, res) => {
@@ -172,9 +171,32 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-const upload = multer({
-  dest: "public/",
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, "public/");
+  },
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}_${file.originalname}`);
+  },
 });
+
+const fileFilter = (req, file, cb) => {
+  const filetypes = /jpeg|jpg|png|gif|pdf/;
+  const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+  const mimetype = filetypes.test(file.mimetype);
+  if (extname && mimetype) {
+    return cb(null, true);
+  } else {
+    cb(new Error("Only images and PDFs are allowed"));
+  }
+};
+
+const upload = multer({ storage, fileFilter }).fields([
+  { name: "image", maxCount: 1 },
+  { name: "pdfFile", maxCount: 1 },
+]);
+
+const uploadImageOnly = multer({ storage, fileFilter }).single("image");
 
 const schema = z.object({
   title: z.string().min(1, "Title is required"),
@@ -184,7 +206,7 @@ const schema = z.object({
   image: z.string().min(1, "Image path is required"),
 });
 
-app.post("/api/apps", upload.single("image"), async (req, res) => {
+app.post("/api/apps", uploadImageOnly, async (req, res) => {
   const { title, content, link, category, table } = req.body;
   const imageFile = req.file;
   try {
@@ -261,21 +283,26 @@ app.get("/api/apps", async (req, res) => {
 });
 
 const projectSchema = z.object({
+  pdfFile: z.string().optional(),
   image: z.string().min(1, "Image path is required"),
 });
 
-app.post("/api/projects", upload.single("image"), async (req, res) => {
+app.post("/api/projects", upload, async (req, res) => {
   const { table } = req.body;
-  const imageFile = req.file;
+  const imageFile = req.files["image"] ? req.files["image"][0] : "";
+  const pdfFile = req.files["pdfFile"] ? req.files["pdfFile"][0] : "";
 
   try {
     const validatedData = projectSchema.parse({
+      pdfFile: pdfFile ? `${pdfFile.filename}` : "",
       image: imageFile ? `${imageFile.filename}` : "",
     });
 
+    console.log(validatedData);
+
     db.query(
-      `INSERT INTO ?? (image) VALUES (?)`,
-      [table, validatedData.image],
+      `INSERT INTO ?? (pdf, image) VALUES (?, ?)`,
+      [table, validatedData.pdfFile, validatedData.image],
       (err, results) => {
         if (err) {
           console.error("Database insertion failed:", err);
