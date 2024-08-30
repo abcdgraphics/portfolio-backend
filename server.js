@@ -29,13 +29,13 @@ app.use(
 app.use(express.static(path.join(__dirname, "public")));
 dotenv.config();
 
-// app.use(
-//   cors({
-//     origin: "http://localhost:5173",
-//     // methods: "GET,POST",
-//     // allowedHeaders: "Content-Type",
-//   })
-// );
+app.use(
+  cors({
+    origin: "http://localhost:5173",
+    // methods: "GET,POST",
+    // allowedHeaders: "Content-Type",
+  })
+);
 
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "http://localhost:5173");
@@ -198,12 +198,28 @@ const upload = multer({ storage, fileFilter }).fields([
 
 const uploadImageOnly = multer({ storage, fileFilter }).single("image");
 
+const checkImageType = (req, res, next) => {
+  if (typeof req.body.image === "string") {
+    return next();
+  }
+  uploadImageOnly(req, res, next);
+};
+
 const schema = z.object({
   title: z.string().min(1, "Title is required"),
   content: z.string().min(1, "Content is required"),
   link: z.string().url("Link must be a valid URL"),
   category: z.enum(["d-only", "d-and-d"], "Category is required"),
   image: z.string().min(1, "Image path is required"),
+});
+
+const editSchema = z.object({
+  title: z.string().min(1, "Title is required"),
+  content: z.string().min(1, "Content is required"),
+  link: z.string().url("Link must be a valid URL"),
+  category: z.enum(["d-only", "d-and-d"], "Category is required"),
+  image: z.string().min(1, "Image path is required"),
+  id: z.string().min(1, "ID is required"),
 });
 
 app.post("/api/apps", uploadImageOnly, async (req, res) => {
@@ -266,9 +282,76 @@ app.post("/api/apps", uploadImageOnly, async (req, res) => {
   }
 });
 
+app.post("/api/edit/apps", checkImageType, async (req, res) => {
+  const { title, content, link, image, category, table, id } = req.body;
+  const imageFile = req.file;
+  try {
+    const validatedData = editSchema.parse({
+      title,
+      content,
+      link,
+      category,
+      image: imageFile ? `${imageFile.filename}` : image,
+      id,
+    });
+
+    db.query(
+      `UPDATE ?? SET title = ?, content = ?, link = ?, category = ?, image = ? WHERE id = ?`,
+      [
+        table,
+        validatedData.title,
+        validatedData.content,
+        validatedData.link,
+        validatedData.category,
+        validatedData.image,
+        validatedData.id,
+      ],
+      (err, results) => {
+        if (err) {
+          console.error("Database update failed:", err.message);
+          return res.status(500).json({ error: "Database update failed" });
+        }
+
+        if (results.affectedRows === 0) {
+          return res.status(404).json({ error: "Record not found" });
+        }
+
+        res.json({ message: "Record updated successfully" });
+      }
+    );
+
+    res.status(200).json({
+      status: "success",
+      message: "Project updated successfully!",
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        status: "fail",
+        errors: error.errors.map((err) => ({
+          field: err.path[0],
+          message: err.message,
+        })),
+      });
+    }
+
+    if (error.response) {
+      console.error("Error Fetching Apps:", error.response);
+      return res.status(500).json({
+        status: "error",
+        message: "Failed to Login",
+      });
+    }
+
+    console.error("Unexpected error:", error);
+    res
+      .status(500)
+      .json({ status: "error", message: "An unexpected error occurred" });
+  }
+});
 app.get("/api/apps", async (req, res) => {
   const tableName = req.query.db;
-
+  console.log(tableName);
   try {
     if (!tableName) {
       return res
@@ -282,9 +365,35 @@ app.get("/api/apps", async (req, res) => {
   }
 });
 
+app.get("/api/edit/apps", async (req, res) => {
+  const tableName = req.query.db;
+  const id = req.query.id;
+
+  try {
+    if (!tableName || !id) {
+      return res
+        .status(400)
+        .json({ status: "fail", error: "Table or ID name is required" });
+    }
+    const [results] = await db.query(`SELECT * FROM ?? WHERE id = ?`, [
+      tableName,
+      id,
+    ]);
+    res.status(200).json({ status: "success", results });
+  } catch (error) {
+    res.status(500).json({ status: "fail", error: "Database query failed" });
+  }
+});
+
 const projectSchema = z.object({
   pdfFile: z.string().optional(),
   image: z.string().min(1, "Image path is required"),
+});
+
+const projectEditSchema = z.object({
+  pdfFile: z.string().optional(),
+  image: z.string().min(1, "Image path is required"),
+  id: z.string().min(1, "ID is required"),
 });
 
 app.post("/api/projects", upload, async (req, res) => {
@@ -341,6 +450,107 @@ app.post("/api/projects", upload, async (req, res) => {
   }
 });
 
+const checkFiles = (req, res, next) => {
+  const { image, pdfFile } = req.body;
+
+  if (typeof image === "string") {
+    req.skipImage = true;
+  }
+
+  if (typeof pdfFile === "string") {
+    req.skipPdf = true;
+  }
+
+  next();
+};
+
+const handleUpload = (req, res, next) => {
+  checkFiles(req, res, () => {
+    upload(req, res, (err) => {
+      if (err) {
+        return next(err);
+      }
+      next();
+    });
+  });
+};
+
+app.post("/api/edit/projects", handleUpload, async (req, res) => {
+  const { table, image, pdfFile, id } = req.body;
+  console.log(image);
+  console.log(pdfFile);
+
+  const imageFile = req.files["image"]
+    ? req.files["image"][0]
+    : image
+    ? image
+    : "";
+  const pdfFile2 = req.files["pdfFile"]
+    ? req.files["pdfFile"][0]
+    : pdfFile
+    ? pdfFile
+    : "";
+  console.log(imageFile);
+  console.log(pdfFile2);
+  try {
+    const validatedData = projectEditSchema.parse({
+      pdfFile: typeof pdfFile2 !== "string" ? `${pdfFile2.filename}` : pdfFile2,
+      image:
+        typeof imageFile !== "string" ? `${imageFile.filename}` : imageFile,
+      id,
+    });
+
+    console.log(validatedData);
+
+    db.query(
+      `UPDATE ?? 
+   SET pdf = ?, image = ?
+   WHERE id = ?`,
+      [table, validatedData.pdfFile, validatedData.image, validatedData.id],
+      (err, results) => {
+        if (err) {
+          console.error("Database update failed:", err);
+          return res.status(500).json({ error: "Database update failed" });
+        }
+
+        if (results.affectedRows === 0) {
+          return res.status(404).json({ error: "Record not found" });
+        }
+
+        res.json({ message: "Record updated successfully" });
+      }
+    );
+
+    res.status(200).json({
+      status: "success",
+      message: "Project submitted successfully!",
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        status: "fail",
+        errors: error.errors.map((err) => ({
+          field: err.path[0],
+          message: err.message,
+        })),
+      });
+    }
+
+    if (error.response) {
+      console.error("Error Fetching Projects:", error.response);
+      return res.status(500).json({
+        status: "error",
+        message: "Failed to Login",
+      });
+    }
+
+    console.error("Unexpected error:", error);
+    res
+      .status(500)
+      .json({ status: "error", message: "An unexpected error occurred" });
+  }
+});
+
 app.get("/api/projects", async (req, res) => {
   const tableName = req.query.db;
 
@@ -351,6 +561,49 @@ app.get("/api/projects", async (req, res) => {
         .json({ status: "fail", error: "Table name is required" });
     }
     const [results] = await db.query(`SELECT * FROM ??`, [tableName]);
+    res.status(200).json({ status: "success", results });
+  } catch (error) {
+    res.status(500).json({ status: "fail", error: "Database query failed" });
+  }
+});
+
+app.get("/api/edit/projects", async (req, res) => {
+  const tableName = req.query.db;
+  const id = req.query.id;
+
+  try {
+    if (!tableName) {
+      return res
+        .status(400)
+        .json({ status: "fail", error: "Table name is required" });
+    }
+    const [results] = await db.query(`SELECT * FROM ?? WHERE id = ?`, [
+      tableName,
+      id,
+    ]);
+    res.status(200).json({ status: "success", results });
+  } catch (error) {
+    res.status(500).json({ status: "fail", error: "Database query failed" });
+  }
+});
+
+app.get("/api/projects/delete", async (req, res) => {
+  const tableName = req.query.type;
+  const id = req.query.id;
+
+  console.log(tableName);
+  console.log(id);
+
+  try {
+    if (!tableName) {
+      return res
+        .status(400)
+        .json({ status: "fail", error: "Table name is required" });
+    }
+    const [results] = await db.query(`DELETE FROM ?? WHERE id = ?`, [
+      tableName,
+      id,
+    ]);
     res.status(200).json({ status: "success", results });
   } catch (error) {
     res.status(500).json({ status: "fail", error: "Database query failed" });
