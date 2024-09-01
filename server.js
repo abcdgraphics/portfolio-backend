@@ -610,6 +610,10 @@ app.get("/api/projects/delete", async (req, res) => {
   }
 });
 
+app.get("/", async (req, res) => {
+  res.status(200).json({ status: "success", results });
+});
+
 app.all("*", (req, res) => {
   res.status(404).json({
     status: "fail",
