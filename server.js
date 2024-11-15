@@ -1,13 +1,12 @@
-import dotenv from "dotenv";
 import express from "express";
-
+import dotenv from "dotenv";
 import bodyParser from "body-parser";
 import { z } from "zod";
 import morgan, { compile } from "morgan";
 import helmet from "helmet";
 import cors from "cors";
 import fs from "fs/promises";
-import db from "./db/dbconfig.js";
+import pool from "./db/dbconfig.js";
 import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 import multer from "multer";
@@ -19,6 +18,11 @@ const app = express();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const env = process.env.NODE_ENV || "dev";
+const envPath = path.resolve(__dirname, `.env.${env}`);
+
+dotenv.config({ path: envPath });
+
 app.use(bodyParser.json());
 app.use(morgan("combined"));
 app.use(
@@ -27,18 +31,17 @@ app.use(
   })
 );
 app.use(express.static(path.join(__dirname, "public")));
-dotenv.config();
 
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: process.env.ORIGIN,
     // methods: "GET,POST",
     // allowedHeaders: "Content-Type",
   })
 );
 
 app.use((req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "http://localhost:5173");
+  res.header("Access-Control-Allow-Origin", process.env.ORIGIN);
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
   next();
@@ -104,47 +107,51 @@ const loginSchema = z.object({
 });
 
 app.post("/api/login", async (req, res) => {
-  console.log(process.env.NODE_ENV);
+  const query = "SELECT * FROM users WHERE email = ?";
+
   try {
-    const formData = loginSchema.parse(req.body);
-    const [rows] = await db.query("SELECT * FROM users WHERE email = ?", [
-      formData.email,
-    ]);
-    const user = rows[0];
+    const connection = await pool.getConnection();
+    try {
+      const formData = loginSchema.parse(req.body);
+      const [rows] = await connection.query(query, [formData.email]);
+      const user = rows[0];
 
-    if (!user) {
-      return res.status(400).json({
-        status: "fail",
-        errors: [{ field: "email", message: "User does not exist" }],
+      if (!user) {
+        return res.status(400).json({
+          status: "fail",
+          errors: [{ field: "email", message: "User does not exist" }],
+        });
+      }
+
+      const isPasswordValid = await bcrypt.compare(
+        formData.password,
+        user.password
+      );
+
+      if (!isPasswordValid) {
+        return res.status(400).json({
+          status: "fail",
+          errors: [{ field: "password", message: "Incorrect password" }],
+        });
+      }
+
+      const userData = {
+        id: user.id,
+        email: user.email,
+      };
+
+      const token = jwt.sign(userData, process.env.SECRET_KEY, {
+        expiresIn: "1h",
       });
-    }
 
-    const isPasswordValid = await bcrypt.compare(
-      formData.password,
-      user.password
-    );
-
-    if (!isPasswordValid) {
-      return res.status(400).json({
-        status: "fail",
-        errors: [{ field: "password", message: "Incorrect password" }],
+      res.status(200).json({
+        status: "success",
+        message: "Successfully Logged In!",
+        token,
       });
+    } finally {
+      connection.release();
     }
-
-    const userData = {
-      id: user.id,
-      email: user.email,
-    };
-
-    const token = jwt.sign(userData, process.env.SECRET_KEY, {
-      expiresIn: "1h",
-    });
-
-    res.status(200).json({
-      status: "success",
-      message: "Successfully Logged In!",
-      token,
-    });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({
@@ -223,39 +230,48 @@ const editSchema = z.object({
 });
 
 app.post("/api/apps", uploadImageOnly, async (req, res) => {
-  const { title, content, link, category, table } = req.body;
-  const imageFile = req.file;
+  const query =
+    "INSERT INTO ?? (title, content, link, category, image) VALUES (?, ?, ?, ?, ?)";
+
   try {
-    const validatedData = schema.parse({
-      title,
-      content,
-      link,
-      category,
-      image: imageFile ? `${imageFile.filename}` : "",
-    });
+    const connection = await pool.getConnection();
+    const { title, content, link, category, table } = req.body;
+    const imageFile = req.file;
 
-    db.query(
-      `INSERT INTO ?? (title, content, link, category, image) VALUES (?, ?, ?, ?, ?)`,
-      [
-        table,
-        validatedData.title,
-        validatedData.content,
-        validatedData.link,
-        validatedData.category,
-        validatedData.image,
-      ],
-      (err, results) => {
-        if (err) {
-          console.error("Database insertion failed:", err.message);
-          return res.status(500).json({ error: "Database insertion failed" });
+    try {
+      const validatedData = schema.parse({
+        title,
+        content,
+        link,
+        category,
+        image: imageFile ? `${imageFile.filename}` : "",
+      });
+
+      await connection.query(
+        query,
+        [
+          table,
+          validatedData.title,
+          validatedData.content,
+          validatedData.link,
+          validatedData.category,
+          validatedData.image,
+        ],
+        (err, results) => {
+          if (err) {
+            console.error("Database insertion failed:", err.message);
+            return res.status(500).json({ error: "Database insertion failed" });
+          }
         }
-      }
-    );
+      );
 
-    res.status(200).json({
-      status: "success",
-      message: "Project submitted successfully!",
-    });
+      res.status(200).json({
+        status: "success",
+        message: "Project submitted successfully!",
+      });
+    } finally {
+      connection.release();
+    }
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({
@@ -283,47 +299,55 @@ app.post("/api/apps", uploadImageOnly, async (req, res) => {
 });
 
 app.post("/api/edit/apps", checkImageType, async (req, res) => {
-  const { title, content, link, image, category, table, id } = req.body;
-  const imageFile = req.file;
+  const query =
+    "UPDATE ?? SET title = ?, content = ?, link = ?, category = ?, image = ? WHERE id = ?";
   try {
-    const validatedData = editSchema.parse({
-      title,
-      content,
-      link,
-      category,
-      image: imageFile ? `${imageFile.filename}` : image,
-      id,
-    });
+    const connection = await pool.getConnection();
+    const { title, content, link, image, category, table, id } = req.body;
+    const imageFile = req.file;
 
-    db.query(
-      `UPDATE ?? SET title = ?, content = ?, link = ?, category = ?, image = ? WHERE id = ?`,
-      [
-        table,
-        validatedData.title,
-        validatedData.content,
-        validatedData.link,
-        validatedData.category,
-        validatedData.image,
-        validatedData.id,
-      ],
-      (err, results) => {
-        if (err) {
-          console.error("Database update failed:", err.message);
-          return res.status(500).json({ error: "Database update failed" });
+    try {
+      const validatedData = editSchema.parse({
+        title,
+        content,
+        link,
+        category,
+        image: imageFile ? `${imageFile.filename}` : image,
+        id,
+      });
+
+      await connection.query(
+        query,
+        [
+          table,
+          validatedData.title,
+          validatedData.content,
+          validatedData.link,
+          validatedData.category,
+          validatedData.image,
+          validatedData.id,
+        ],
+        (err, results) => {
+          if (err) {
+            console.error("Database update failed:", err.message);
+            return res.status(500).json({ error: "Database update failed" });
+          }
+
+          if (results.affectedRows === 0) {
+            return res.status(404).json({ error: "Record not found" });
+          }
+
+          res.json({ message: "Record updated successfully" });
         }
+      );
 
-        if (results.affectedRows === 0) {
-          return res.status(404).json({ error: "Record not found" });
-        }
-
-        res.json({ message: "Record updated successfully" });
-      }
-    );
-
-    res.status(200).json({
-      status: "success",
-      message: "Project updated successfully!",
-    });
+      res.status(200).json({
+        status: "success",
+        message: "Project updated successfully!",
+      });
+    } finally {
+      connection.release();
+    }
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({
@@ -349,37 +373,46 @@ app.post("/api/edit/apps", checkImageType, async (req, res) => {
       .json({ status: "error", message: "An unexpected error occurred" });
   }
 });
+
 app.get("/api/apps", async (req, res) => {
-  const tableName = req.query.db;
-  console.log(tableName);
+  const query = "SELECT * FROM ??";
   try {
-    if (!tableName) {
-      return res
-        .status(400)
-        .json({ status: "fail", error: "Table name is required" });
+    const connection = await pool.getConnection();
+    const tableName = req.query.db;
+    try {
+      if (!tableName) {
+        return res
+          .status(400)
+          .json({ status: "fail", error: "Table name is required" });
+      }
+      const [results] = await connection.query(query, [tableName]);
+      res.status(200).json({ status: "success", results });
+    } finally {
+      connection.release();
     }
-    const [results] = await db.query(`SELECT * FROM ??`, [tableName]);
-    res.status(200).json({ status: "success", results });
   } catch (error) {
     res.status(500).json({ status: "fail", error: "Database query failed" });
   }
 });
 
 app.get("/api/edit/apps", async (req, res) => {
-  const tableName = req.query.db;
-  const id = req.query.id;
-
+  const query = "SELECT * FROM ?? WHERE id = ?";
   try {
-    if (!tableName || !id) {
-      return res
-        .status(400)
-        .json({ status: "fail", error: "Table or ID name is required" });
+    const connection = await pool.getConnection();
+    const tableName = req.query.db;
+    const id = req.query.id;
+
+    try {
+      if (!tableName || !id) {
+        return res
+          .status(400)
+          .json({ status: "fail", error: "Table or ID name is required" });
+      }
+      const [results] = await connection.query(query, [tableName, id]);
+      res.status(200).json({ status: "success", results });
+    } finally {
+      connection.release();
     }
-    const [results] = await db.query(`SELECT * FROM ?? WHERE id = ?`, [
-      tableName,
-      id,
-    ]);
-    res.status(200).json({ status: "success", results });
   } catch (error) {
     res.status(500).json({ status: "fail", error: "Database query failed" });
   }
@@ -397,33 +430,37 @@ const projectEditSchema = z.object({
 });
 
 app.post("/api/projects", upload, async (req, res) => {
-  const { table } = req.body;
-  const imageFile = req.files["image"] ? req.files["image"][0] : "";
-  const pdfFile = req.files["pdfFile"] ? req.files["pdfFile"][0] : "";
-
+  const query = "INSERT INTO ?? (pdf, image) VALUES (?, ?)";
   try {
-    const validatedData = projectSchema.parse({
-      pdfFile: pdfFile ? `${pdfFile.filename}` : "",
-      image: imageFile ? `${imageFile.filename}` : "",
-    });
+    const connection = await pool.getConnection();
+    const { table } = req.body;
+    const imageFile = req.files["image"] ? req.files["image"][0] : "";
+    const pdfFile = req.files["pdfFile"] ? req.files["pdfFile"][0] : "";
 
-    console.log(validatedData);
+    try {
+      const validatedData = projectSchema.parse({
+        pdfFile: pdfFile ? `${pdfFile.filename}` : "",
+        image: imageFile ? `${imageFile.filename}` : "",
+      });
 
-    db.query(
-      `INSERT INTO ?? (pdf, image) VALUES (?, ?)`,
-      [table, validatedData.pdfFile, validatedData.image],
-      (err, results) => {
-        if (err) {
-          console.error("Database insertion failed:", err);
-          return res.status(500).json({ error: "Database insertion failed" });
+      await connection.query(
+        query,
+        [table, validatedData.pdfFile, validatedData.image],
+        (err, results) => {
+          if (err) {
+            console.error("Database insertion failed:", err);
+            return res.status(500).json({ error: "Database insertion failed" });
+          }
         }
-      }
-    );
+      );
 
-    res.status(200).json({
-      status: "success",
-      message: "Project submitted successfully!",
-    });
+      res.status(200).json({
+        status: "success",
+        message: "Project submitted successfully!",
+      });
+    } finally {
+      connection.release();
+    }
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({
@@ -476,55 +513,54 @@ const handleUpload = (req, res, next) => {
 };
 
 app.post("/api/edit/projects", handleUpload, async (req, res) => {
-  const { table, image, pdfFile, id } = req.body;
-  console.log(image);
-  console.log(pdfFile);
-
-  const imageFile = req.files["image"]
-    ? req.files["image"][0]
-    : image
-    ? image
-    : "";
-  const pdfFile2 = req.files["pdfFile"]
-    ? req.files["pdfFile"][0]
-    : pdfFile
-    ? pdfFile
-    : "";
-  console.log(imageFile);
-  console.log(pdfFile2);
+  const query = "UPDATE ?? SET pdf = ?, image = ? WHERE id = ?";
   try {
-    const validatedData = projectEditSchema.parse({
-      pdfFile: typeof pdfFile2 !== "string" ? `${pdfFile2.filename}` : pdfFile2,
-      image:
-        typeof imageFile !== "string" ? `${imageFile.filename}` : imageFile,
-      id,
-    });
+    const connection = await pool.getConnection();
+    const { table, image, pdfFile, id } = req.body;
+    const imageFile = req.files["image"]
+      ? req.files["image"][0]
+      : image
+      ? image
+      : "";
+    const pdfFile2 = req.files["pdfFile"]
+      ? req.files["pdfFile"][0]
+      : pdfFile
+      ? pdfFile
+      : "";
 
-    console.log(validatedData);
+    try {
+      const validatedData = projectEditSchema.parse({
+        pdfFile:
+          typeof pdfFile2 !== "string" ? `${pdfFile2.filename}` : pdfFile2,
+        image:
+          typeof imageFile !== "string" ? `${imageFile.filename}` : imageFile,
+        id,
+      });
 
-    db.query(
-      `UPDATE ?? 
-   SET pdf = ?, image = ?
-   WHERE id = ?`,
-      [table, validatedData.pdfFile, validatedData.image, validatedData.id],
-      (err, results) => {
-        if (err) {
-          console.error("Database update failed:", err);
-          return res.status(500).json({ error: "Database update failed" });
+      await connection.query(
+        query,
+        [table, validatedData.pdfFile, validatedData.image, validatedData.id],
+        (err, results) => {
+          if (err) {
+            console.error("Database update failed:", err);
+            return res.status(500).json({ error: "Database update failed" });
+          }
+
+          if (results.affectedRows === 0) {
+            return res.status(404).json({ error: "Record not found" });
+          }
+
+          res.json({ message: "Record updated successfully" });
         }
+      );
 
-        if (results.affectedRows === 0) {
-          return res.status(404).json({ error: "Record not found" });
-        }
-
-        res.json({ message: "Record updated successfully" });
-      }
-    );
-
-    res.status(200).json({
-      status: "success",
-      message: "Project submitted successfully!",
-    });
+      res.status(200).json({
+        status: "success",
+        message: "Project submitted successfully!",
+      });
+    } finally {
+      connection.release();
+    }
   } catch (error) {
     if (error instanceof z.ZodError) {
       return res.status(400).json({
@@ -552,59 +588,68 @@ app.post("/api/edit/projects", handleUpload, async (req, res) => {
 });
 
 app.get("/api/projects", async (req, res) => {
-  const tableName = req.query.db;
-
+  const query = "SELECT * FROM ??";
   try {
-    if (!tableName) {
-      return res
-        .status(400)
-        .json({ status: "fail", error: "Table name is required" });
+    const connection = await pool.getConnection();
+    const tableName = req.query.db;
+
+    try {
+      if (!tableName) {
+        return res
+          .status(400)
+          .json({ status: "fail", error: "Table name is required" });
+      }
+      const [results] = await connection.query(query, [tableName]);
+      res.status(200).json({ status: "success", results });
+    } finally {
+      connection.release();
     }
-    const [results] = await db.query(`SELECT * FROM ??`, [tableName]);
-    res.status(200).json({ status: "success", results });
   } catch (error) {
     res.status(500).json({ status: "fail", error: "Database query failed" });
   }
 });
 
 app.get("/api/edit/projects", async (req, res) => {
-  const tableName = req.query.db;
-  const id = req.query.id;
-
+  const query = "SELECT * FROM ?? WHERE id = ?";
   try {
-    if (!tableName) {
-      return res
-        .status(400)
-        .json({ status: "fail", error: "Table name is required" });
+    const connection = await pool.getConnection();
+    const tableName = req.query.db;
+    const id = req.query.id;
+
+    try {
+      if (!tableName) {
+        return res
+          .status(400)
+          .json({ status: "fail", error: "Table name is required" });
+      }
+      const [results] = await connection.query(query, [tableName, id]);
+      res.status(200).json({ status: "success", results });
+    } finally {
+      connection.release();
     }
-    const [results] = await db.query(`SELECT * FROM ?? WHERE id = ?`, [
-      tableName,
-      id,
-    ]);
-    res.status(200).json({ status: "success", results });
   } catch (error) {
     res.status(500).json({ status: "fail", error: "Database query failed" });
   }
 });
 
 app.get("/api/projects/delete", async (req, res) => {
-  const tableName = req.query.type;
-  const id = req.query.id;
-
-  console.log(tableName);
-  console.log(id);
-
+  const query = "DELETE FROM ?? WHERE id = ?";
   try {
-    if (!tableName) {
-      return res
-        .status(400)
-        .json({ status: "fail", error: "Table name is required" });
+    const connection = await pool.getConnection();
+    const tableName = req.query.type;
+    const id = req.query.id;
+
+    try {
+      if (!tableName) {
+        return res
+          .status(400)
+          .json({ status: "fail", error: "Table name is required" });
+      }
+      const [results] = await connection.query(query, [tableName, id]);
+      res.status(200).json({ status: "success", results });
+    } finally {
+      connection.release();
     }
-    const [results] = await db.query(`DELETE FROM ?? WHERE id = ?`, [
-      tableName,
-      id,
-    ]);
-    res.status(200).json({ status: "success", results });
   } catch (error) {
     res.status(500).json({ status: "fail", error: "Database query failed" });
   }
