@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-  "start:dev": "cross-env NODE_ENV=dev nodemon server.js",
-  "start:prod": "cross-env NODE_ENV=prod nodemon server.js"
+  "start:dev": "cross-env NODE_ENV=dev node server.js",
+  "start:prod": "cross-env NODE_ENV=prod node server.js"
   },
   "keywords": [],
   "author": "",
